@@ -61,6 +61,16 @@ public class ExecutionDetailsService {
      *                                    operator errors that must fail a deploy.
      */
     public void syncExecutionMode(ServiceConfig config) {
+        syncExecutionMode(config, false);
+    }
+
+    /**
+     * @param quiet true when this is a routine poll rather than a deploy or an explicit
+     *              refresh. Real events - a mode applied, records created - are still logged
+     *              every time; the "nothing to do here" notices are not, because repeating
+     *              them every few seconds would bury the lines that matter.
+     */
+    public void syncExecutionMode(ServiceConfig config, boolean quiet) {
 
         String serviceName = config.getServiceName();
 
@@ -69,9 +79,11 @@ public class ExecutionDetailsService {
         // no VS_EXECUTIONMODE record, no change to the .vs. Deploying a service *with* a mode
         // is how it opts in.
         if (config.getExecutionModeType() == ExecutionModeType.NONE) {
-            Logger.getInstance().info("[ExecutionMode] " + serviceName
-                    + ": no execution mode set in the .vs; skipping. Deploy with a mode"
-                    + " (Stand In, Live Invocation or Failover) to use the feature.");
+            if (!quiet) {
+                Logger.getInstance().info("[ExecutionMode] " + serviceName
+                        + ": no execution mode set in the .vs; skipping. Deploy with a mode"
+                        + " (Stand In, Live Invocation or Failover) to use the feature.");
+            }
             return;
         }
 
@@ -87,7 +99,7 @@ public class ExecutionDetailsService {
                     .findByMasterIdAndVirtServer(catalog.getMasterId(), virtServer);
 
             if (existing.isPresent()) {
-                applyDatabaseValues(config, existing.get());
+                applyDatabaseValues(config, existing.get(), quiet);
             } else {
                 createRecordsFromVsFile(config, catalog, virtServer);
             }
@@ -98,15 +110,18 @@ public class ExecutionDetailsService {
         } catch (Exception e) {
             // The database being down must not stop a service from starting - it simply runs on
             // whatever the .vs file says.
-            Logger.getInstance().info("[ExecutionMode] Could not reach the database for '"
-                    + serviceName + "' (virtServer=" + virtServer + "). Continuing on .vs values. "
-                    + e.getMessage());
+            if (!quiet) {
+                Logger.getInstance().info("[ExecutionMode] Could not reach the database for '"
+                        + serviceName + "' (virtServer=" + virtServer + "). Continuing on .vs values. "
+                        + e.getMessage());
+            }
         }
     }
 
     // ---- flow A: database record exists, database wins ----
 
-    private void applyDatabaseValues(ServiceConfig config, VsExecutionMode record) throws Exception {
+    private void applyDatabaseValues(ServiceConfig config, VsExecutionMode record, boolean quiet)
+            throws Exception {
 
         String serviceName = config.getServiceName();
         String dbMode = trimToEmpty(record.getExecutionMode());
@@ -114,8 +129,10 @@ public class ExecutionDetailsService {
 
         if (dbMode.isEmpty()) {
             // No opinion recorded - the .vs value stands.
-            Logger.getInstance().info("[ExecutionMode] " + serviceName
-                    + ": database row carries no mode; keeping .vs values.");
+            if (!quiet) {
+                Logger.getInstance().info("[ExecutionMode] " + serviceName
+                        + ": database row carries no mode; keeping .vs values.");
+            }
             return;
         }
 
@@ -126,7 +143,7 @@ public class ExecutionDetailsService {
                 ? activeHostOf(record.getVsid())
                 : null;
 
-        if (type.usesLiveUrls() && activeUrl == null) {
+        if (type.usesLiveUrls() && activeUrl == null && !quiet) {
             Logger.getInstance().info("[ExecutionMode] " + serviceName
                     + ": mode is " + dbMode + " but no live URL is active in VS_LIVEURLS;"
                     + " applying the mode and keeping the .vs host and port.");
@@ -143,7 +160,8 @@ public class ExecutionDetailsService {
                 serviceName,
                 config.getVirtualService() == null ? null : config.getVirtualService().getXmlPath(),
                 dbMode,
-                activeUrl);
+                activeUrl,
+                quiet);
 
         if (result.getXmlContent() != null) {
             config.setXmlFileContent(result.getXmlContent());

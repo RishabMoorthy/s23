@@ -1,5 +1,6 @@
 package org.framework.utils;
 
+import org.common.db.config.ConfigLoader;
 import org.framework.config.ExecutionModeType;
 import org.framework.constants.PathConstants;
 import org.w3c.dom.Document;
@@ -49,6 +50,10 @@ public final class ExecutionModeXmlUpdater {
     private static final String PORT = "Port";
     private static final String ACTIVE = "active";
 
+    /** The environment this server runs in, written into every LiveURL's EnvType. */
+    private static final String APP_ENV_KEY = "app.env";
+    private static final String DEFAULT_ENV_TYPE = "QA";
+
     private ExecutionModeXmlUpdater() {
     }
 
@@ -89,10 +94,26 @@ public final class ExecutionModeXmlUpdater {
             String executionMode,
             LiveUrlFormat.Parsed liveUrl) throws Exception {
 
-        Path file = resolveXmlFile(serviceName, xmlPathHint);
+        return apply(serviceName, xmlPathHint, executionMode, liveUrl, false);
+    }
+
+    /**
+     * @param quiet true on a routine poll. A file that was rewritten is always reported; the
+     *              "nothing here to write to" notices are not, since they would otherwise
+     *              repeat on every pass.
+     */
+    public static Result apply(String serviceName,
+            String xmlPathHint,
+            String executionMode,
+            LiveUrlFormat.Parsed liveUrl,
+            boolean quiet) throws Exception {
+
+        Path file = resolveXmlFile(serviceName, xmlPathHint, quiet);
         if (file == null) {
-            Logger.getInstance().info("[ExecutionMode] No .vs file found for " + serviceName
-                    + "; in-memory execution mode applied, file left untouched.");
+            if (!quiet) {
+                Logger.getInstance().info("[ExecutionMode] No .vs file found for " + serviceName
+                        + "; in-memory execution mode applied, file left untouched.");
+            }
             return new Result(false, null);
         }
 
@@ -104,8 +125,10 @@ public final class ExecutionModeXmlUpdater {
         Element root = doc.getDocumentElement();
         Element executionModeEl = firstChild(root, EXECUTION_MODE);
         if (executionModeEl == null) {
-            Logger.getInstance().info("[ExecutionMode] " + serviceName
-                    + " has no root ExecutionMode element; file left untouched.");
+            if (!quiet) {
+                Logger.getInstance().info("[ExecutionMode] " + serviceName
+                        + " has no root ExecutionMode element; file left untouched.");
+            }
             return new Result(false, null);
         }
 
@@ -180,6 +203,11 @@ public final class ExecutionModeXmlUpdater {
         }
 
         boolean changed = false;
+
+        // config.properties decides the environment, not the file. If EnvType is missing or
+        // says something else, it is corrected.
+        changed |= setChildText(doc, target, ENV_TYPE, configuredEnvType());
+
         changed |= setChildText(doc, target, TRANS_TYPE, liveUrl.getTransportType());
         changed |= setChildText(doc, target, HOST, liveUrl.getHost());
         changed |= setChildText(doc, target, PORT, liveUrl.getPort());
@@ -267,7 +295,7 @@ public final class ExecutionModeXmlUpdater {
     // ---- file handling ----
 
     /** vsfiles/&lt;name&gt;.xml, falling back to the parser's own path. */
-    private static Path resolveXmlFile(String serviceName, String xmlPathHint) {
+    private static Path resolveXmlFile(String serviceName, String xmlPathHint, boolean quiet) {
 
         Path conventional = Paths.get(PathConstants.VS_XML_DIRECTORY, serviceName + ".xml");
         if (Files.exists(conventional)) {
@@ -283,8 +311,10 @@ public final class ExecutionModeXmlUpdater {
                     return hinted;
                 }
             } catch (Exception e) {
-                Logger.getInstance().info("[ExecutionMode] Unusable xmlPath for " + serviceName
-                        + ": " + xmlPathHint);
+                if (!quiet) {
+                    Logger.getInstance().info("[ExecutionMode] Unusable xmlPath for " + serviceName
+                            + ": " + xmlPathHint);
+                }
             }
         }
 
@@ -329,9 +359,8 @@ public final class ExecutionModeXmlUpdater {
      * Writes a complete LiveURL in the order the portal writes it: EnvType, TransType, Host,
      * Port, BasePath.
      *
-     * <p>EnvType and BasePath are emitted empty. Neither is stored in the database - BasePath
-     * plays no part in the live endpoint, and EnvType is not synced - so a value cannot be
-     * recovered here once the element has been cleared by a Stand-In switch.
+     * <p>EnvType is taken from app.env in config.properties. BasePath is emitted empty: it
+     * plays no part in the live endpoint and is not stored anywhere.
      *
      * <p>Indentation is copied from the surrounding document so the rewritten block matches
      * the rest of the file.
@@ -345,7 +374,7 @@ public final class ExecutionModeXmlUpdater {
         Element urlEl = createElement(doc, liveUrlsEl, LIVE_URL);
         urlEl.setAttribute(ACTIVE, "true");
 
-        appendChildText(doc, urlEl, ENV_TYPE, "", innermost);
+        appendChildText(doc, urlEl, ENV_TYPE, configuredEnvType(), innermost);
         appendChildText(doc, urlEl, TRANS_TYPE, liveUrl.getTransportType(), innermost);
         appendChildText(doc, urlEl, HOST, liveUrl.getHost(), innermost);
         appendChildText(doc, urlEl, PORT, liveUrl.getPort(), innermost);
@@ -369,6 +398,25 @@ public final class ExecutionModeXmlUpdater {
             el.setTextContent(value);
         }
         parent.appendChild(el);
+    }
+
+    /**
+     * The environment name for this server, from app.env in config.properties, upper-cased to
+     * match how EnvType is written in the .vs files (QA, UAT).
+     *
+     * <p>Falls back to QA when app.env is unset or unreadable, so the element always carries a
+     * real environment rather than an empty tag.
+     */
+    private static String configuredEnvType() {
+        try {
+            String env = ConfigLoader.getProperty(APP_ENV_KEY);
+            if (env != null && !env.isBlank()) {
+                return env.trim().toUpperCase();
+            }
+        } catch (Exception ignored) {
+            // config unavailable - fall through to the default
+        }
+        return DEFAULT_ENV_TYPE;
     }
 
     /** The whitespace run immediately before an element, used to match existing indentation. */
