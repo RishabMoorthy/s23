@@ -53,20 +53,42 @@ public class ExecutionDetailsService {
     /**
      * Reconciles the database and the .vs file for one service.
      *
-     * @throws ExecutionModeSyncException when stubserver.ip is not configured, or the service is
-     *                                    not in READYAPI_VS_CATALOG - both operator errors that
-     *                                    must fail a deploy
+     * @throws ExecutionModeSyncException when stubserver.ip is not configured, or the mode is
+     *                                    enabled and the service is not in READYAPI_VS_CATALOG -
+     *                                    operator errors that must fail a deploy. A service with
+     *                                    the mode switched off is not held to the catalog
+     *                                    requirement; it is logged and left alone.
      */
     public void syncExecutionMode(ServiceConfig config) {
 
         String virtServer = resolveVirtServer();
         String serviceName = config.getServiceName();
 
+        // An empty <ExecutionModeValue/> means the feature is switched off for this service:
+        // it serves its configured responses and never calls a destination server. Nothing
+        // needs resolving, so a missing catalog entry is only worth a warning here.
+        boolean modeEnabled = config.getExecutionModeType() != ExecutionModeType.NONE;
+
         try {
-            VsCatalog catalog = catalogRepository.findByVsname(serviceName)
-                    .orElseThrow(() -> new ExecutionModeSyncException(
+            Optional<VsCatalog> found = catalogRepository.findByVsname(serviceName);
+
+            if (found.isEmpty()) {
+
+                if (modeEnabled) {
+                    throw new ExecutionModeSyncException(
                             "Service '" + serviceName + "' is not in the catalog."
-                                    + " Add it to READYAPI_VS_CATALOG, then deploy."));
+                                    + " Add it to READYAPI_VS_CATALOG, then deploy.");
+                }
+
+                // Nothing else to do, and nothing can be recorded without a MASTERID.
+                Logger.getInstance().info("[ExecutionMode] " + serviceName
+                        + ": execution mode is off and the service is not in READYAPI_VS_CATALOG;"
+                        + " nothing to sync. Add a catalog entry if it should be switchable"
+                        + " from the portal later.");
+                return;
+            }
+
+            VsCatalog catalog = found.get();
 
             Optional<VsExecutionMode> existing = executionModeRepository
                     .findByMasterIdAndVirtServer(catalog.getMasterId(), virtServer);
